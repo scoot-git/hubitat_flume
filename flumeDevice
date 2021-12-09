@@ -50,6 +50,8 @@ metadata
         attribute "usageLastMonth", "number"
         
         attribute "notificationStream", "string"
+        attribute "notificationStreamHour", "string"       // SAC
+        attribute "notificationLastCheck", "string"        // SAC        
     }
 }
 
@@ -68,6 +70,23 @@ preferences
         input "refreshInterval", "number", title: "Refresh interval (minutes)", defaultValue: 2, required: true
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
     }
+}
+
+private String flumeUtcToLocal(String time) {  // SAC
+// Convert the date and time from Flume notification to a local time with locale format
+  try {
+    // Create a UTC formatter and parse the given time
+    java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+    format.setTimeZone(TimeZone.getTimeZone("UTC"));
+    Date date = format.parse(time);
+    // Create a local/locale formatter and format the given time
+    format = new java.text.SimpleDateFormat("yyyy-MM-dd hh:mm:ss a");
+    time = format.format(date);
+  }
+  catch (Exception e) {
+    logError("Exception in flumeUtcToLocal(): ${e}");
+  }
+  return (time);
 }
 
 def logDebug(msg) 
@@ -129,10 +148,9 @@ def initialize(doGetTokens)
 def refresh()
 {
     try
-    {
+    {      
         unschedule(refresh)
-        
-        queryDevice()
+        queryDevice()    
         fetchUsageAlerts()
         fetchNotifications()
         fetchLocations()
@@ -194,45 +212,63 @@ def fetchLocations()
 
 def fetchNotifications()
 {
+    def msgDate
+    def msgText
     def queryString = "?limit=1000&sort_direction=ASC&flume_leak=true"
     def resp = httpExec("GET", genParamsMain("users/${getUserId()}/notifications/${queryString}"), true)?.data
     logDebug("fetchNotifications resp = ${resp}")
-    
+  
     if(resp?.data)
     {
-        def tempCount = getNotifCount() ?: 0
+        def tempCount = getNotifCount() ?: 0        
+        tempCount = 0  
         
-        if(resp.data.size() >= tempCount)
-        {
-            // this is a typical state; 
-            //   there are at least as many notifications as we think we already have read
-            
-            // hack the known ones off of the beginning, then process the rest
-            for(i = 0; i < tempCount; i++)
-            {
-                resp.data.remove(0)
-            }            
-        }
-        else
-        {
-            // less are in the notification than we think we already have read,
-            //  so they must have been cleared in the app
-            
-            // reset count and process them all to catch up
-            tempCount = 0
-        }
-        
+        logDebug("start loop")        
         for(notification in resp.data)
         {
             tempCount++
-            
-            sendEvent(name: "notificationStream", value: "[${notification.created_datetime}]: ${notification.message}", isStateChange: true)
-            
-            // short pause to try to keep them sequential in the event log
-            pauseExecution(10)
+            //sendEvent(name: "notificationStream", value: "[${notification.created_datetime}]: ${notification.message}", isStateChange: true)  // SAC replaced with below
+// SAC start 
+            msgDateStr = flumeUtcToLocal(notification.created_datetime)
+            msgText = "${notification.message}"          
+            sendEvent(name: "notificationStream", value: "[${msgDateStr}] ${msgText}", isStateChange: true)
+            logDebug("in notification loop found = ${msgDateStr}")       
+            pauseExecution(10)  // short pause to try to keep them sequential in the event log
         }
+        // we now have the last notification or no notification
+        logDebug("notification count = ${tempCount}")   
+        if (tempCount != 0) {
+            logDebug("notification last = ${msgDateStr}") 
+            pattern = "yyyy-MM-dd hh:mm:ss a"
+            def msgTimestamp = new java.text.SimpleDateFormat(pattern).parse(msgDateStr)          
+            def nowTimeStr = (new Date()).format('yyyy/MM/dd HH:mm:ss')  // must be this format
+            use(groovy.time.TimeCategory) {
+                def hourAgo = new Date(nowTimeStr) - 1.hours
+                def hourAgoStr = hourAgo.format("yyyy-MM-dd hh:mm:ss a")
+                logDebug("hourAgoStr = ${hourAgoStr}")        
+                expired = msgTimestamp.compareTo(hourAgo)
+                logDebug("less than 1 message is an hour or more old = ${expired}")
+                // if the msgDate is over an hourAgo blank it, otherwise show it
+                if (expired <= 0) {
+                    sendEvent(name: "notificationStreamHour", value: " ", isStateChange: true) 
+                } else {
+                    sendEvent(name: "notificationStreamHour", value: "[${msgDateStr}] ${msgText}", isStateChange: true)               
+                }    
+            }
+        } else {  // THERE ARE NO NOTIFICATIONS
+            sendEvent(name: "notificationStream", value: " ", isStateChange: true)
+            sendEvent(name: "notificationStreamHour", value: " ", isStateChange: true)                 
+        }   
         setNotifCount(tempCount)
+    } else {  // THIS MIGHT BE CONSIDERED A PROBLEM
+        logDebug("there was no response data") 
+        sendEvent(name: "notificationStream", value: " ", isStateChange: true)    
+        sendEvent(name: "notificationStreamHour", value: " ", isStateChange: true)               
     }
+    def fetchTime = (new Date()).format('yyyy-MM-dd HH:mm:ss')  // update notificationLastCheck
+    sendEvent(name: "notificationLastCheck", value: "${fetchTime}", isStateChange: true)
+    
+// SAC end
 }
 
 def setNotifCount(count)
@@ -335,6 +371,8 @@ def queryDevice()
     
     def query = new groovy.json.JsonOutput().toJson([queries: [qMin, qHour, qDay, qWeek, qMonth]])
     
+    logDebug("QD pre post")
+    
     def resp = httpExec("POST", genParamsMain("users/${getUserId()}/devices/${getDevices()[0]?.id}/query", query), true)?.data
     if(resp)
     {
@@ -345,6 +383,7 @@ def queryDevice()
         sendEvent(name: "usageLastWeek", value: (resp.data[0]?.lastWeek && (resp.data[0]?.lastWeek?.size() > 0)) ? resp.data[0].lastWeek.getAt(resp.data[0].lastWeek.size() - 1)?.value?.toFloat().round(2) : "n/a")
         sendEvent(name: "usageLastMonth", value: (resp.data[0]?.lastMonth && (resp.data[0]?.lastMonth?.size() > 0)) ? resp.data[0].lastMonth.getAt(resp.data[0].lastMonth.size() - 1)?.value?.toFloat().round(2) : "n/a")
     }
+    logDebug("QD post if resp")    
 }
 
 def setAwayMode(away)
@@ -446,6 +485,7 @@ def updateAuthTokensStore(resp)
 {
     if(resp)
     {
+        logDebug("updateAuthTokensStore in") 
         setRefreshToken(resp.data?.getAt(0)?.refresh_token)
         
         setAccessToken(resp.data?.getAt(0)?.access_token)
@@ -458,6 +498,7 @@ def updateAuthTokensStore(resp)
             runIn(interval - 60 * 60, refreshTokens)
         }
     }
+    logDebug("updateAuthTokensStore out") 
 }
 
 def setAccessToken(token)
