@@ -230,8 +230,10 @@ def fetchNotifications()
             //sendEvent(name: "notificationStream", value: "[${notification.created_datetime}]: ${notification.message}", isStateChange: true)  // SAC replaced with below
 // SAC start 
             msgDateStr = flumeUtcToLocal(notification.created_datetime)
-            msgText = "${notification.message}"          
-            sendEvent(name: "notificationStream", value: "[${msgDateStr}] ${msgText}", isStateChange: true)
+            msgText = "${notification.message}"     
+            
+            prefixMsg = '<DIV id="FlumeNotification">'
+            sendEvent(name: "notificationStream", value: "${prefixMsg}[${msgDateStr}] ${msgText}</DIV>", isStateChange: true)
             logDebug("in notification loop found = ${msgDateStr}")       
             pauseExecution(10)  // short pause to try to keep them sequential in the event log
         }
@@ -252,7 +254,8 @@ def fetchNotifications()
                 if (expired <= 0) {
                     sendEvent(name: "notificationStreamHour", value: " ", isStateChange: true) 
                 } else {
-                    sendEvent(name: "notificationStreamHour", value: "[${msgDateStr}] ${msgText}", isStateChange: true)               
+                    prefixMsg = '<DIV id="FlumeNotificationHour">'
+                    sendEvent(name: "notificationStreamHour", value: "${prefixMsg}[${msgDateStr}] ${msgText}</DIV>", isStateChange: true)               
                 }    
             }
         } else {  // THERE ARE NO NOTIFICATIONS
